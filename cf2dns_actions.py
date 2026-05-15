@@ -29,7 +29,7 @@ REGION_HW = 'cn-east-3'
 REGION_ALI = 'cn-hongkong'
 
 # [核心修改] 解析生效时间。注意：DNSPod 免费版最低只能是 600，填 60 会报错！付费版可填 60。
-TTL = 60
+TTL = 600
 
 # v4为筛选出IPv4的IP  v6为筛选出IPv6的IP
 if len(sys.argv) >= 2:
