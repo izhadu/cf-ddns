@@ -6,7 +6,7 @@ on:
       - master
   schedule:
     - cron: '*/16 * * * *'
-
+  workflow_dispatch:  # <--- 加上这一行！它的专业术语叫“工作流手动调度”
 env:
   UPDATE_IPV4: true
   UPDATE_IPV6: false
