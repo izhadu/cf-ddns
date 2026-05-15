@@ -6,7 +6,7 @@ on:
       - master
       - main  # 兼容当前 GitHub 的默认分支命名习惯
   schedule:
-    - cron: '*/16 * * * *'
+    - cron: '0 */6 * * *'
   workflow_dispatch:  # 保留手动触发开关
 
 env:
