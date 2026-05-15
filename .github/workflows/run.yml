@@ -4,25 +4,37 @@ on:
   push:
     branches: 
       - master
+      - main  # 兼容当前 GitHub 的默认分支命名习惯
   schedule:
     - cron: '*/16 * * * *'
-  workflow_dispatch:  # <--- 加上这一行！它的专业术语叫“工作流手动调度”
+  workflow_dispatch:  # 保留手动触发开关
+
 env:
   UPDATE_IPV4: true
   UPDATE_IPV6: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 5  # [优化1] 全局超时熔断，最多运行 5 分钟
+    
     steps:
-      - name: 'Checkout'
-        uses: actions/checkout@v3
-      - name: 'Set up Python'
-        uses: actions/setup-python@v4
+      - name: 'Checkout 代码'
+        uses: actions/checkout@v4  # [优化2] 升级到 v4，消除底层警告
+
+      - name: '设置 Python 环境'
+        uses: actions/setup-python@v5  # [优化2] 升级到 v5，适配最新架构
         with:
-          python-version: 3.9.12
-      - name: 'Install dependencies'
-        run: if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-      - name: 'run cf2dns v4'
+          python-version: '3.10'       # [优化3] 使用更稳健的 3.10，不写死具体的补丁号
+          cache: 'pip'                 # [优化4] 开启原生 Pip 缓存，执行提速！
+
+      - name: '安装依赖包'
+        run: |
+          if [ -f requirements.txt ]; then 
+            pip install -r requirements.txt
+          fi
+
+      - name: '执行同步: IPv4 (A记录)'
         if: env.UPDATE_IPV4 == 'true' && !cancelled()
         env:
           KEY: ${{ secrets.KEY }}
@@ -30,7 +42,8 @@ jobs:
           SECRETID: ${{ secrets.SECRETID }}
           SECRETKEY: ${{ secrets.SECRETKEY }}
         run: python cf2dns_actions.py A
-      - name: 'run cf2dns v6'
+
+      - name: '执行同步: IPv6 (AAAA记录)'
         if: env.UPDATE_IPV6 == 'true' && !cancelled()
         env:
           KEY: ${{ secrets.KEY }}
