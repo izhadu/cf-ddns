@@ -80,7 +80,6 @@ jobs:
           SECRETID: ${{ secrets.SECRETID }}
           SECRETKEY: ${{ secrets.SECRETKEY }}
           DOMAINS: ${{ secrets.DOMAINS }}
-          DOMAINS: ${{ secrets.DOMAINS }}
           # ======= 在这里远程调节控制开关 =======
           # 填 'True'  -> 只更新默认线路，强制荡平其余老旧分线路
           # 填 'False' -> 恢复原厂设置，按照你的 DOMAINS 多线路并发更新
