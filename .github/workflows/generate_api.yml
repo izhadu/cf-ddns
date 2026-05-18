@@ -58,8 +58,9 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
          commit_message: "Update IP & API: $(date +'%Y-%m-%d %H:%M:%S')"
-         branch: main
-         file_pattern: 'bestcf.txt bestproxy.txt ip.json' # 只提交这三个文件
+         # 【修改这里】：删掉 branch: main 这一行，或者把它改成 branch: master
+         branch: master 
+         file_pattern: 'bestcf.txt bestproxy.txt ip.json'
          commit_user_name: github-actions[bot]
          commit_user_email: github-actions[bot]@users.noreply.github.com
 
