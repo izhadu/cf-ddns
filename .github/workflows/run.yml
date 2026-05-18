@@ -1,53 +1,89 @@
-name: 'GitHub Actions CloudFlare2DNSPod Bot'
+name: 'Cloudflare 优选 IP 闭环同步更新引擎'
 
 on:
-  push:
-    branches: 
-      - master
-      - main  # 兼容当前 GitHub 的默认分支命名习惯
+  workflow_dispatch:  # 支持控制台手动一键触发测试
   schedule:
-    - cron: '0 */6 * * *'
-  workflow_dispatch:  # 保留手动触发开关
+    - cron: '0 */4 * * *'  # 每 4 小时全自动闭环调度执行一次
 
 env:
-  UPDATE_IPV4: true
-  UPDATE_IPV6: false
+  TZ: Asia/Shanghai
 
 jobs:
-  build:
+  Automated-DDNS-Engine:
     runs-on: ubuntu-latest
-    timeout-minutes: 5  # [优化1] 全局超时熔断，最多运行 5 分钟
     
+    # 核心安全设计：确保工作流具备写代码库生成 ip.json 的权限，以及维护删除日志记录的动作权限
+    permissions:
+      contents: write
+      actions: write
+
     steps:
-      - name: 'Checkout 代码'
-        uses: actions/checkout@v4  # [优化2] 升级到 v4，消除底层警告
+      - name: '1. 拉取当前最新仓库代码'
+        uses: actions/checkout@v4
 
-      - name: '设置 Python 环境'
-        uses: actions/setup-python@v5  # [优化2] 升级到 v5，适配最新架构
+      - name: '2. 部署运行所需的标准 Python 环境'
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'       # [优化3] 使用更稳健的 3.10，不写死具体的补丁号
-          cache: 'pip'                 # [优化4] 开启原生 Pip 缓存，执行提速！
+          python-version: '3.10'
+          cache: 'pip'
 
-      - name: '安装依赖包'
+      - name: '3. 预安装系统第三方依赖扩展组件'
         run: |
-          if [ -f requirements.txt ]; then 
-            pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: '4. 迁移移植拉取上游最新基础 IP 库'
+        run: |
+          echo "正在抓取最新 bestcf 集合..."
+          curl -s https://raw.githubusercontent.com/ymyuuu/IPDB/main/BestCF/bestcfv4.txt -o bestcf_raw.txt
+          echo "正在抓取最新 bestproxy 集合..."
+          curl -s https://raw.githubusercontent.com/ymyuuu/IPDB/main/BestProxy/bestproxy.txt -o bestproxy_raw.txt
+
+      - name: '5. 下沉调用 CloudflareST 高并发本地环境压力测速'
+        run: |
+          # 自动静默拉取官方高效率编译版 Linux 测速核心
+          wget -nv -O CloudflareST.tar.gz https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.5/CloudflareST_linux_amd64.tar.gz
+          tar -zxf CloudflareST.tar.gz CloudflareST
+          chmod +x CloudflareST
+          
+          # 判断用户是否提供了真实测速目标。有则在容器环境中做严格校验，无则直接保留上游最热IP
+          if [ -n "${{ secrets.TEST_URL }}" ]; then
+            echo "发现 TEST_URL，开始针对物理连通性能进行高并发测速筛查..."
+            ./CloudflareST -n 500 -sl 5 -tl 600 -tp 443 -f bestcf_raw.txt -url https://${{ secrets.TEST_URL }} -o result_cf.txt
+            awk -F "," 'NR>1 {print $1}' result_cf.txt | head -n 10 > bestcf.txt
+            
+            ./CloudflareST -n 500 -sl 5 -tl 600 -tp 443 -f bestproxy_raw.txt -url https://${{ secrets.TEST_URL }} -o result_proxy.txt
+            awk -F "," 'NR>1 {print $1}' result_proxy.txt | head -n 10 > bestproxy.txt
+          else
+            echo "没有在 Secrets 中找到 TEST_URL，自动进入降级保障状态，直用上游优选数据进行融合。"
+            cp bestcf_raw.txt bestcf.txt
+            cp bestproxy_raw.txt bestproxy.txt
           fi
 
-      - name: '执行同步: IPv4 (A记录)'
-        if: env.UPDATE_IPV4 == 'true' && !cancelled()
-        env:
-          KEY: ${{ secrets.KEY }}
-          DOMAINS: ${{ secrets.DOMAINS }}
-          SECRETID: ${{ secrets.SECRETID }}
-          SECRETKEY: ${{ secrets.SECRETKEY }}
-        run: python cf2dns_actions.py A
+      - name: '6. 调用本地转换组件生成标准化 ip.json API 格式'
+        run: |
+          python generate_api.py
 
-      - name: '执行同步: IPv6 (AAAA记录)'
-        if: env.UPDATE_IPV6 == 'true' && !cancelled()
+      - name: '7. 闪存最新的优选结果和接口资产到本仓库'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "自动同步优选接口与txt缓存数据池: $(date +'%Y-%m-%d %H:%M:%S')"
+          branch: master 
+          file_pattern: 'bestcf.txt bestproxy.txt ip.json'
+          commit_user_name: github-actions[bot]
+          commit_user_email: github-actions[bot]@users.noreply.github.com
+
+      - name: '8. 唤醒同步引擎，执行远程DNS记录云端批量刷入修改'
         env:
-          KEY: ${{ secrets.KEY }}
-          DOMAINS: ${{ secrets.DOMAINSV6 }}
+          # 此处保持与您 cf2dns_actions.py 或本地逻辑的契合，若有变量可用 Secrets 提取
           SECRETID: ${{ secrets.SECRETID }}
           SECRETKEY: ${{ secrets.SECRETKEY }}
-        run: python cf2dns_actions.py AAAA
+        run: |
+          # 直接在最新的代码环境里拉起脚本更新域名
+          python cf2dns.py
+
+      - name: '9. 清理多余的工作流历史冗余垃圾包日志'
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          retain_days: 1
+          keep_minimum_runs: 3
