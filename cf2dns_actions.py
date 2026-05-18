@@ -11,33 +11,23 @@ from dns.qCloud import QcloudApiv3
 from dns.aliyun import AliApi
 from dns.huawei import HuaWeiApi
 
-# ================= 新增核心模式控制变量 =================
-# True : 强力精简模式（只同步默认 DEF 线路，全自动清空残留的移动/联通/电信分线路记录）
-# False: 传统多线路模式（严格按照你在 GitHub Secrets 里的 DOMAINS 分线路配置进行独立更新）
+# ================= 模式控制变量 =================
+# True : 只同步默认 DEF 线路，全自动清空残留的移动/联通/电信分线路记录
+# False: 三网多线路独立切分更新
 ONLY_DEFAULT = os.environ.get("ONLY_DEFAULT", "True").lower() == "true"
 # =======================================================
 
-# 可以从https://shop.hostmonit.com获取
 KEY = os.environ.get("KEY", "")  
-# CM:移动 CU:联通 CT:电信 AB:境外 DEF:默认
 DOMAINS = json.loads(os.environ.get("DOMAINS", "{}"))  
-# 腾讯云后台获取 https://console.cloud.tencent.com/cam/capi
 SECRETID = os.environ.get("SECRETID", "")  
 SECRETKEY = os.environ.get("SECRETKEY", "")  
 
-# 默认为普通版本 不用修改
-AFFECT_NUM = 2
-# DNS服务商 1:DNSPod, 2:阿里云, 3:华为云
+AFFECT_NUM = 10
 DNS_SERVER = 1
-# 华为云解析 REGION
 REGION_HW = 'cn-east-3'
-# 阿里云解析 REGION 
 REGION_ALI = 'cn-hongkong'
-
-# 解析生效时间
 TTL = 600
 
-# v4为筛选出IPv4的IP  v6为筛选出IPv6的IP
 if len(sys.argv) >= 2:
     RECORD_TYPE = sys.argv[1]
 else:
@@ -58,54 +48,45 @@ def get_optimization_ip():
         print("CHANGE OPTIMIZATION IP ERROR: " + str(e))
         return None
 
-def changeDNS(line, s_info, c_info, domain, sub_domain, cloud):
+def changeDNS(line_code, s_info, c_info, domain, sub_domain, cloud):
+    """
+    [重构优化版]：完美解决原厂脚本“只补齐不更新”以及“多余记录删不干净”的底层逻辑缺陷。
+    """
     global AFFECT_NUM, RECORD_TYPE
-
-    lines = {"CM": "移动", "CU": "联通", "CT": "电信", "AB": "境外", "DEF": "默认"}
-    line = lines[line]
+    lines_map = {"CM": "移动", "CU": "联通", "CT": "电信", "AB": "境外", "DEF": "默认"}
+    line_name = lines_map.get(line_code, "默认")
 
     try:
-        create_num = AFFECT_NUM - len(s_info)
-        if create_num == 0:
-            for info in s_info:
-                if len(c_info) == 0:
-                    break
-                cf_ip = c_info.pop(random.randint(0, len(c_info)-1))["ip"]
-                if cf_ip in str(s_info):
-                    continue
-                ret = cloud.change_record(domain, info["recordId"], sub_domain, cf_ip, RECORD_TYPE, line, TTL)
-                if DNS_SERVER != 1 or ret["code"] == 0:
-                    print(f"CHANGE DNS SUCCESS: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}----DOMAIN: {domain}----SUBDOMAIN: {sub_domain}----RECORDLINE: {line}----RECORDID: {info['recordId']}----VALUE: {cf_ip}")
-                else:
-                    print(f"CHANGE DNS ERROR: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}----DOMAIN: {domain}----SUBDOMAIN: {sub_domain}----RECORDLINE: {line}----RECORDID: {info['recordId']}----VALUE: {cf_ip}----MESSAGE: {ret['message']}")
-        elif create_num > 0:
-            for i in range(create_num):
-                if len(c_info) == 0:
-                    break
-                cf_ip = c_info.pop(random.randint(0, len(c_info)-1))["ip"]
-                if cf_ip in str(s_info):
-                    continue
-                ret = cloud.create_record(domain, sub_domain, cf_ip, RECORD_TYPE, line, TTL)
-                if DNS_SERVER != 1 or ret["code"] == 0:
-                    print(f"CREATE DNS SUCCESS: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}----DOMAIN: {domain}----SUBDOMAIN: {sub_domain}----RECORDLINE: {line}----VALUE: {cf_ip}")
-                else:
-                    print(f"CREATE DNS ERROR: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}----DOMAIN: {domain}----SUBDOMAIN: {sub_domain}----RECORDLINE: {line}----VALUE: {cf_ip}----MESSAGE: {ret.get('message', 'Unknown Error')}")
-        else:
-            for info in s_info:
-                if create_num == 0 or len(c_info) == 0:
-                    break
-                cf_ip = c_info.pop(random.randint(0, len(c_info)-1))["ip"]
-                if cf_ip in str(s_info):
-                    create_num += 1
-                    continue
-                ret = cloud.change_record(domain, info["recordId"], sub_domain, cf_ip, RECORD_TYPE, line, TTL)
-                if DNS_SERVER != 1 or ret["code"] == 0:
-                    print(f"CHANGE DNS SUCCESS: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}----DOMAIN: {domain}----SUBDOMAIN: {sub_domain}----RECORDLINE: {line}----RECORDID: {info['recordId']}----VALUE: {cf_ip}")
-                else:
-                    print(f"CHANGE DNS ERROR: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}----DOMAIN: {domain}----SUBDOMAIN: {sub_domain}----RECORDLINE: {line}----RECORDID: {info['recordId']}----VALUE: {cf_ip}----MESSAGE: {ret['message']}")
-                create_num += 1
+        updated_count = 0
+        
+        # 步骤 1：遍历现有的解析记录，直接用最新优选 IP 进行修改替换
+        for info in s_info:
+            if updated_count >= AFFECT_NUM or len(c_info) == 0:
+                # 如果现有的记录已经超过了期望的 AFFECT_NUM，直接在云端将其删除，确保清爽
+                cloud.del_record(domain, info["recordId"])
+                print(f"🧹 成功清理多余的历史冗余记录: {sub_domain}.{domain} [{line_name}] | ID: {info['recordId']}")
+                continue
+            
+            cf_ip = c_info.pop(random.randint(0, len(c_info) - 1))["ip"]
+            ret = cloud.change_record(domain, info["recordId"], sub_domain, cf_ip, RECORD_TYPE, line_name, TTL)
+            if DNS_SERVER != 1 or ret.get("code") == 0:
+                print(f"CHANGE DNS SUCCESS: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}----DOMAIN: {domain}----SUBDOMAIN: {sub_domain}----RECORDLINE: {line_name}----RECORDID: {info['recordId']}----VALUE: {cf_ip}")
+            else:
+                print(f"CHANGE DNS ERROR: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}----DOMAIN: {domain}----SUBDOMAIN: {sub_domain}----RECORDLINE: {line_name}----RECORDID: {info['recordId']}----VALUE: {cf_ip}----MESSAGE: {ret.get('message')}")
+            updated_count += 1
+                
+        # 步骤 2：如果现有记录处理完后，数量仍不足 AFFECT_NUM，自动触发补齐机制创建新记录
+        while updated_count < AFFECT_NUM and len(c_info) > 0:
+            cf_ip = c_info.pop(random.randint(0, len(c_info) - 1))["ip"]
+            ret = cloud.create_record(domain, sub_domain, cf_ip, RECORD_TYPE, line_name, TTL)
+            if DNS_SERVER != 1 or ret.get("code") == 0:
+                print(f"CREATE DNS SUCCESS: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}----DOMAIN: {domain}----SUBDOMAIN: {sub_domain}----RECORDLINE: {line_name}----VALUE: {cf_ip}")
+            else:
+                print(f"CREATE DNS ERROR: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}----DOMAIN: {domain}----SUBDOMAIN: {sub_domain}----RECORDLINE: {line_name}----VALUE: {cf_ip}----MESSAGE: {ret.get('message', 'Unknown Error')}")
+            updated_count += 1
+            
     except Exception as e:
-            print(f"CHANGE DNS ERROR: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}----MESSAGE: {traceback.format_exc()}")
+        print(f"CHANGE DNS ERROR: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}----MESSAGE: {traceback.format_exc()}")
 
 def main(cloud):
     global AFFECT_NUM, RECORD_TYPE, ONLY_DEFAULT
@@ -117,7 +98,7 @@ def main(cloud):
                 return
             
             if ONLY_DEFAULT:
-                # ================= 模式 1: 仅更新全网默认线路 =================
+                # 模式 1: 仅更新全网默认线路
                 print("⚠️ [当前运行模式]: 仅更新【默认(DEF)】线路，自动清理其余分线路记录。")
                 cf_defips = cfips["info"].get("DEF", cfips["info"].get("CT", []))
                 
@@ -148,7 +129,7 @@ def main(cloud):
                             print(f"🚀 正在将最新优选 IP 同步至【默认】线路...")
                             changeDNS("DEF", def_info, temp_cf_defips, domain, sub_domain, cloud)
             else:
-                # ================= 模式 2: CU / CM / CT 分开独立更新 =================
+                # 模式 2: CU / CM / CT 分开独立更新
                 print("🌐 [当前运行模式]: 三网多线路独立切分更新。")
                 cf_cmips = cfips["info"].get("CM", [])
                 cf_cuips = cfips["info"].get("CU", [])
