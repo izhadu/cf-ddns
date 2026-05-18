@@ -30,7 +30,12 @@ jobs:
       - name: '3. 预安装系统第三方依赖扩展组件'
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          # 【核心修复】：直接读取 requirements.txt 一键安装完整 SDK 依赖，解决组件缺失报错
+          if [ -f requirements.txt ]; then 
+            pip install -r requirements.txt
+          else
+            pip install requests
+          fi
 
       - name: '4. 迁移移植拉取上游最新基础 IP 库'
         run: |
@@ -75,11 +80,9 @@ jobs:
 
       - name: '8. 唤醒同步引擎，执行远程DNS记录云端批量刷入修改'
         env:
-          # 此处保持与您 cf2dns_actions.py 或本地逻辑的契合，若有变量可用 Secrets 提取
           SECRETID: ${{ secrets.SECRETID }}
           SECRETKEY: ${{ secrets.SECRETKEY }}
         run: |
-          # 直接在最新的代码环境里拉起脚本更新域名
           python cf2dns.py
 
       - name: '9. 清理多余的工作流历史冗余垃圾包日志'
