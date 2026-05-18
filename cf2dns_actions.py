@@ -11,6 +11,12 @@ from dns.qCloud import QcloudApiv3
 from dns.aliyun import AliApi
 from dns.huawei import HuaWeiApi
 
+# ================= 新增核心模式控制变量 =================
+# True : 强力精简模式（只同步默认 DEF 线路，全自动清空残留的移动/联通/电信分线路记录）
+# False: 传统多线路模式（严格按照你在 GitHub Secrets 里的 DOMAINS 分线路配置进行独立更新）
+ONLY_DEFAULT = os.environ.get("ONLY_DEFAULT", "True").lower() == "true"
+# =======================================================
+
 # 可以从https://shop.hostmonit.com获取
 KEY = os.environ.get("KEY", "")  
 # CM:移动 CU:联通 CT:电信 AB:境外 DEF:默认
@@ -39,16 +45,14 @@ else:
 
 
 def get_optimization_ip():
-    """
-    [重构优化]：不再请求外部Hostmonit接口，直接读取本地由测速脚本闭环生成的 ip.json 资产
-    """
+    """从本地闭环生成的 ip.json 获取优选池"""
     try:
         if os.path.exists('ip.json'):
             with open('ip.json', 'r', encoding='utf-8') as f:
                 print("成功读取到本地闭环生成的优选 IP 接口数据。")
                 return json.load(f)
         else:
-            print("CHANGE OPTIMIZATION IP ERROR: 本地 ip.json 文件未找到，请检查上一步是否成功生成。")
+            print("CHANGE OPTIMIZATION IP ERROR: 本地 ip.json 文件未找到。")
             return None
     except Exception as e:
         print("CHANGE OPTIMIZATION IP ERROR: " + str(e))
@@ -104,7 +108,7 @@ def changeDNS(line, s_info, c_info, domain, sub_domain, cloud):
             print(f"CHANGE DNS ERROR: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}----MESSAGE: {traceback.format_exc()}")
 
 def main(cloud):
-    global AFFECT_NUM, RECORD_TYPE
+    global AFFECT_NUM, RECORD_TYPE, ONLY_DEFAULT
     if len(DOMAINS) > 0:
         try:
             cfips = get_optimization_ip()
@@ -112,58 +116,88 @@ def main(cloud):
                 print(f"GET CLOUDFLARE IP ERROR: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
                 return
             
-            cf_cmips = cfips["info"].get("CM", [])
-            cf_cuips = cfips["info"].get("CU", [])
-            cf_ctips = cfips["info"].get("CT", [])
-            
-            for domain, sub_domains in DOMAINS.items():
-                for sub_domain, lines in sub_domains.items():
-                    temp_cf_cmips = cf_cmips.copy()
-                    temp_cf_cuips = cf_cuips.copy()
-                    temp_cf_ctips = cf_ctips.copy()
-                    temp_cf_abips = cf_ctips.copy()
-                    temp_cf_defips = cf_ctips.copy()
-                    
-                    if DNS_SERVER == 1:
-                        ret = cloud.get_record(domain, 20, sub_domain, "CNAME")
-                        if ret["code"] == 0:
+            if ONLY_DEFAULT:
+                # ================= 模式 1: 仅更新全网默认线路 =================
+                print("⚠️ [当前运行模式]: 仅更新【默认(DEF)】线路，自动清理其余分线路记录。")
+                cf_defips = cfips["info"].get("DEF", cfips["info"].get("CT", []))
+                
+                for domain, sub_domains in DOMAINS.items():
+                    for sub_domain, _ in sub_domains.items():
+                        temp_cf_defips = cf_defips.copy()
+                        
+                        if DNS_SERVER == 1:
+                            ret = cloud.get_record(domain, 20, sub_domain, "CNAME")
+                            if ret["code"] == 0:
+                                for record in ret["data"]["records"]:
+                                    if record["line"] in ["移动", "联通", "电信", "默认"]:
+                                        cloud.del_record(domain, record["id"])
+                        
+                        ret = cloud.get_record(domain, 100, sub_domain, RECORD_TYPE)
+                        if DNS_SERVER != 1 or ret["code"] == 0:
+                            if DNS_SERVER == 1 and "Free" in ret["data"]["domain"]["grade"] and AFFECT_NUM > 2:
+                                AFFECT_NUM = 2
+                                
+                            def_info = []
                             for record in ret["data"]["records"]:
                                 if record["line"] in ["移动", "联通", "电信"]:
-                                    retMsg = cloud.del_record(domain, record["id"])
-                                    if retMsg["code"] == 0:
-                                        print(f"DELETE DNS SUCCESS: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}----DOMAIN: {domain}----SUBDOMAIN: {sub_domain}----RECORDLINE: {record['line']}")
-                                    else:
-                                        print(f"DELETE DNS ERROR: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}----DOMAIN: {domain}----SUBDOMAIN: {sub_domain}----RECORDLINE: {record['line']}----MESSAGE: {retMsg['message']}")
-                    
-                    ret = cloud.get_record(domain, 100, sub_domain, RECORD_TYPE)
-                    if DNS_SERVER != 1 or ret["code"] == 0:
-                        if DNS_SERVER == 1 and "Free" in ret["data"]["domain"]["grade"] and AFFECT_NUM > 2:
-                            AFFECT_NUM = 2
+                                    print(f"🧹 顺手清理老旧线路记录: {sub_domain}.{domain} [{record['line']}] -> {record['value']}")
+                                    cloud.del_record(domain, record["id"])
+                                elif record["line"] == "默认":
+                                    def_info.append({"recordId": record["id"], "value": record["value"]})
                             
-                        cm_info, cu_info, ct_info, ab_info, def_info = [], [], [], [], []
-                        line_mapping = {
-                            "移动": cm_info, "联通": cu_info, "电信": ct_info, 
-                            "境外": ab_info, "默认": def_info
-                        }
+                            print(f"🚀 正在将最新优选 IP 同步至【默认】线路...")
+                            changeDNS("DEF", def_info, temp_cf_defips, domain, sub_domain, cloud)
+            else:
+                # ================= 模式 2: CU / CM / CT 分开独立更新 =================
+                print("🌐 [当前运行模式]: 三网多线路独立切分更新。")
+                cf_cmips = cfips["info"].get("CM", [])
+                cf_cuips = cfips["info"].get("CU", [])
+                cf_ctips = cfips["info"].get("CT", [])
+                
+                for domain, sub_domains in DOMAINS.items():
+                    for sub_domain, lines in sub_domains.items():
+                        temp_cf_cmips = cf_cmips.copy()
+                        temp_cf_cuips = cf_cuips.copy()
+                        temp_cf_ctips = cf_ctips.copy()
+                        temp_cf_abips = cf_ctips.copy()
+                        temp_cf_defips = cf_ctips.copy()
                         
-                        for record in ret["data"]["records"]:
-                            if record["line"] in line_mapping:
-                                line_mapping[record["line"]].append({
-                                    "recordId": record["id"], 
-                                    "value": record["value"]
-                                })
+                        if DNS_SERVER == 1:
+                            ret = cloud.get_record(domain, 20, sub_domain, "CNAME")
+                            if ret["code"] == 0:
+                                for record in ret["data"]["records"]:
+                                    if record["line"] in ["移动", "联通", "电信"]:
+                                        cloud.del_record(domain, record["id"])
+                        
+                        ret = cloud.get_record(domain, 100, sub_domain, RECORD_TYPE)
+                        if DNS_SERVER != 1 or ret["code"] == 0:
+                            if DNS_SERVER == 1 and "Free" in ret["data"]["domain"]["grade"] and AFFECT_NUM > 2:
+                                AFFECT_NUM = 2
+                                
+                            cm_info, cu_info, ct_info, ab_info, def_info = [], [], [], [], []
+                            line_mapping = {
+                                "移动": cm_info, "联通": cu_info, "电信": ct_info, 
+                                "境外": ab_info, "默认": def_info
+                            }
+                            
+                            for record in ret["data"]["records"]:
+                                if record["line"] in line_mapping:
+                                    line_mapping[record["line"]].append({
+                                        "recordId": record["id"], 
+                                        "value": record["value"]
+                                    })
 
-                        for line in lines:
-                            if line == "CM":
-                                changeDNS("CM", cm_info, temp_cf_cmips, domain, sub_domain, cloud)
-                            elif line == "CU":
-                                changeDNS("CU", cu_info, temp_cf_cuips, domain, sub_domain, cloud)
-                            elif line == "CT":
-                                changeDNS("CT", ct_info, temp_cf_ctips, domain, sub_domain, cloud)
-                            elif line == "AB":
-                                changeDNS("AB", ab_info, temp_cf_abips, domain, sub_domain, cloud)
-                            elif line == "DEF":
-                                changeDNS("DEF", def_info, temp_cf_defips, domain, sub_domain, cloud)
+                            for line in lines:
+                                if line == "CM":
+                                    changeDNS("CM", cm_info, temp_cf_cmips, domain, sub_domain, cloud)
+                                elif line == "CU":
+                                    changeDNS("CU", cu_info, temp_cf_cuips, domain, sub_domain, cloud)
+                                elif line == "CT":
+                                    changeDNS("CT", ct_info, temp_cf_ctips, domain, sub_domain, cloud)
+                                elif line == "AB":
+                                    changeDNS("AB", ab_info, temp_cf_abips, domain, sub_domain, cloud)
+                                elif line == "DEF":
+                                    changeDNS("DEF", def_info, temp_cf_defips, domain, sub_domain, cloud)
         except Exception as e:
             print(f"CHANGE DNS ERROR: ----Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}----MESSAGE: {traceback.format_exc()}")
 
