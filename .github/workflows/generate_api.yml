@@ -15,6 +15,7 @@ jobs:
     # 【核心修复】：赋予 GitHub Actions 机器人推送到仓库的读写权限，解决 403 报错
     permissions:
       contents: write
+      actions: write
       
     steps:
       - name: Checkout Repository
