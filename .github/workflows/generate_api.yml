@@ -1,0 +1,70 @@
+name: "自动更新优选IP并生成API"
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每 4 小时执行一次，你可以根据需要调整 cron 时间
+    - cron: '0 */4 * * *'
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  Update-And-Generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 拉取上游最新 IP 列表 (移植 update_bestip)
+        run: |
+          echo "获取 bestcf..."
+          curl -s https://raw.githubusercontent.com/ymyuuu/IPDB/main/BestCF/bestcfv4.txt -o bestcf_raw.txt
+          echo "获取 bestproxy..."
+          curl -s https://raw.githubusercontent.com/ymyuuu/IPDB/main/BestProxy/bestproxy.txt -o bestproxy_raw.txt
+
+      - name: 运行 CloudflareST 测速 (移植 bestproxy)
+        run: |
+          # 下载 CloudflareSpeedTest 测速工具
+          wget -nv -O CloudflareST.tar.gz https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.2.5/CloudflareST_linux_amd64.tar.gz
+          tar -zxf CloudflareST.tar.gz CloudflareST
+          chmod +x CloudflareST
+          
+          # 提取环境变量，如果没有配置 TEST_URL 则跳过严格测速，直接使用默认 IP
+          if [ -n "${{ secrets.TEST_URL }}" ]; then
+            echo "开始对 BestCF IP 进行测速..."
+            ./CloudflareST -n 500 -sl 5 -tl 600 -tp 443 -f bestcf_raw.txt -url https://${{ secrets.TEST_URL }} -o result_cf.txt
+            # 提取测速结果中最快的 10 个 IP 写入最终的 bestcf.txt
+            awk -F "," 'NR>1 {print $1}' result_cf.txt | head -n 10 > bestcf.txt
+            
+            echo "开始对 BestProxy IP 进行测速..."
+            ./CloudflareST -n 500 -sl 5 -tl 600 -tp 443 -f bestproxy_raw.txt -url https://${{ secrets.TEST_URL }} -o result_proxy.txt
+            awk -F "," 'NR>1 {print $1}' result_proxy.txt | head -n 10 > bestproxy.txt
+          else
+            echo "未配置 TEST_URL，跳过测速，直接使用上游数据"
+            cp bestcf_raw.txt bestcf.txt
+            cp bestproxy_raw.txt bestproxy.txt
+          fi
+
+      - name: 生成 json 接口
+        run: |
+          python generate_api.py
+
+      - name: 提交更新到仓库
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+         commit_message: "Update IP & API: $(date +'%Y-%m-%d %H:%M:%S')"
+         branch: main
+         file_pattern: 'bestcf.txt bestproxy.txt ip.json' # 只提交这三个文件
+         commit_user_name: github-actions[bot]
+         commit_user_email: github-actions[bot]@users.noreply.github.com
+
+      - name: 清理旧的工作流运行记录
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          retain_days: 1
+          keep_minimum_runs: 3
