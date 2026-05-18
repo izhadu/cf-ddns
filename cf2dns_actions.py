@@ -7,7 +7,7 @@ import os
 import traceback
 import sys
 
-from dns.qCloud import QcloudApiv3 # QcloudApiv3 DNSPod 的 API 更新了 github@z0z0r4
+from dns.qCloud import QcloudApiv3 
 from dns.aliyun import AliApi
 from dns.huawei import HuaWeiApi
 
@@ -28,7 +28,7 @@ REGION_HW = 'cn-east-3'
 # 阿里云解析 REGION 
 REGION_ALI = 'cn-hongkong'
 
-# [核心修改] 解析生效时间。注意：DNSPod 免费版最低只能是 600，填 60 会报错！付费版可填 60。
+# 解析生效时间
 TTL = 600
 
 # v4为筛选出IPv4的IP  v6为筛选出IPv6的IP
@@ -39,15 +39,16 @@ else:
 
 
 def get_optimization_ip():
+    """
+    [重构优化]：不再请求外部Hostmonit接口，直接读取本地由测速脚本闭环生成的 ip.json 资产
+    """
     try:
-        # [优化] 修复了原代码的 headers = headers = 的笔误
-        headers = {'Content-Type': 'application/json'}
-        data = {"key": KEY, "type": "v4" if RECORD_TYPE == "A" else "v6"}
-        response = requests.post('https://api.hostmonit.com/get_optimization_ip', json=data, headers=headers, timeout=15)
-        if response.status_code == 200:
-            return response.json()
+        if os.path.exists('ip.json'):
+            with open('ip.json', 'r', encoding='utf-8') as f:
+                print("成功读取到本地闭环生成的优选 IP 接口数据。")
+                return json.load(f)
         else:
-            print(f"CHANGE OPTIMIZATION IP ERROR: REQUEST STATUS CODE IS {response.status_code}")
+            print("CHANGE OPTIMIZATION IP ERROR: 本地 ip.json 文件未找到，请检查上一步是否成功生成。")
             return None
     except Exception as e:
         print("CHANGE OPTIMIZATION IP ERROR: " + str(e))
@@ -139,7 +140,6 @@ def main(cloud):
                         if DNS_SERVER == 1 and "Free" in ret["data"]["domain"]["grade"] and AFFECT_NUM > 2:
                             AFFECT_NUM = 2
                             
-                        # [优化] 使用字典合并逻辑，替代原来近 30 行的冗余 if-elif 结构
                         cm_info, cu_info, ct_info, ab_info, def_info = [], [], [], [], []
                         line_mapping = {
                             "移动": cm_info, "联通": cu_info, "电信": ct_info, 
